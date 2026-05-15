@@ -1,0 +1,13 @@
+[project]
+name = "aiagent"
+version = "0.1.0"
+description = "An autonomous AI coding agent with diff-based patch editing and AST-validated file modification."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["agent", "AI", "coding-agent", "patch-engine", "function-calling"]
+
+dependencies = [
+    "google-genai==1.12.1",
+    "python-dotenv==1.1.0",
+]
+

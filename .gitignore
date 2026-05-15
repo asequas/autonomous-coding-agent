@@ -1,0 +1,44 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+env/
+ENV/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+wheels/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+
+# Environment files
+.env
+.env.*
+
+# Test workspaces created by your tests
+tests/*workspace/
+tests/*_workspace/
+**/workspace/
+**/*_workspace/
+
+# Your agent's internal work directory
+workspace/
+
+# Avoid pushing sample outputs or debug files
+*.log
+
+# uv cache
+.uv/
