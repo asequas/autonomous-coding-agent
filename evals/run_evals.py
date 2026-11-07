@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import shutil
@@ -31,19 +32,19 @@ from pathlib import Path
 from rich.console import Console
 
 from aiagent.agent import Agent, AgentObserver
-from aiagent.config import AgentConfig, default_model, load_api_key
+from aiagent.config import AgentConfig, default_model, format_usd, load_api_key
 from aiagent.llm import GeminiClient, LLMClient
 from aiagent.process import CommandResult, run_command
 from aiagent.sandbox import Workspace
-from aiagent.tools import ToolContext
 from aiagent.trace import JsonlTrace
 from aiagent.ui import RichReporter
-from aiagent.verify import run_verification
+from aiagent.verify import PYTEST_ARGV, run_verification
 
 EVALS_DIR = Path(__file__).resolve().parent
 TASKS_DIR = EVALS_DIR / "tasks"
 RESULTS_DIR = EVALS_DIR / "results"
 HIDDEN_DIR_NAME = "_hidden_tests"
+DEFAULTS = AgentConfig(workdir=Path("."))
 
 
 @dataclass(frozen=True)
@@ -92,8 +93,7 @@ def prepare(task: Task, dest: Path, *, with_solution: bool = False) -> Path:
 
 def run_hidden_tests(task: Task, workdir: Path) -> CommandResult:
     shutil.copytree(task.path / "hidden", workdir / HIDDEN_DIR_NAME, dirs_exist_ok=True)
-    argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", HIDDEN_DIR_NAME]
-    return run_command(argv, workdir, timeout=120)
+    return run_command([*PYTEST_ARGV, HIDDEN_DIR_NAME], workdir, DEFAULTS.command_timeout)
 
 
 def validate(tasks: Sequence[Task], console: Console) -> bool:
@@ -104,14 +104,16 @@ def validate(tasks: Sequence[Task], console: Console) -> bool:
             before = run_hidden_tests(task, prepare(task, Path(tmp) / "start"))
             solved = prepare(task, Path(tmp) / "solved", with_solution=True)
             after = run_hidden_tests(task, solved)
-            ctx = ToolContext(Workspace(solved), AgentConfig(workdir=solved))
-            visible = run_verification(ctx)
+            visible = run_verification(Workspace(solved), AgentConfig(workdir=solved))
         problems = []
         if before.ok:
             problems.append("hidden tests already pass on the starting repo")
         if not after.ok:
-            problems.append("hidden tests fail on the reference solution\n" + after.format(4000))
-        if visible.passed is False:
+            problems.append(
+                "hidden tests fail on the reference solution\n"
+                + after.format(DEFAULTS.max_output_chars)
+            )
+        if visible.status == "failed":
             problems.append("visible tests fail on the reference solution")
         status = "[green]ok[/green]" if not problems else "[red]FAIL[/red]"
         console.print(f"{status}  {task.id}")
@@ -124,7 +126,6 @@ def validate(tasks: Sequence[Task], console: Console) -> bool:
 def run_trial(
     task: Task,
     client: LLMClient,
-    model: str,
     trial: int,
     console: Console,
     *,
@@ -133,16 +134,15 @@ def run_trial(
 ) -> Outcome:
     with tempfile.TemporaryDirectory() as tmp:
         workdir = prepare(task, Path(tmp) / "repo")
-        config = AgentConfig(workdir=workdir, model=model)
         observers: list[AgentObserver] = [RichReporter(console, verbose=True)] if verbose else []
-        trace = JsonlTrace(traces / f"{task.id}-{trial}.jsonl") if traces else None
-        if trace:
-            observers.append(trace)
-        try:
-            result = Agent(client, config, observers=observers).run(task.prompt)
-        finally:
-            if trace:
-                trace.close()
+        with contextlib.ExitStack() as stack:
+            if traces:
+                observers.append(
+                    stack.enter_context(JsonlTrace(traces / f"{task.id}-{trial}.jsonl"))
+                )
+            result = Agent(client, AgentConfig(workdir=workdir), observers=observers).run(
+                task.prompt
+            )
         check = run_hidden_tests(task, workdir)
     return Outcome(
         task=task.id,
@@ -155,7 +155,7 @@ def run_trial(
         input_tokens=result.usage.input_tokens,
         cached_tokens=result.usage.cached_tokens,
         output_tokens=result.usage.output_tokens,
-        cost_usd=result.usage.cost(model),
+        cost_usd=result.usage.cost(result.model),
         duration_s=round(result.duration_s, 1),
     )
 
@@ -173,7 +173,7 @@ def summarize(outcomes: Sequence[Outcome], model: str, trials: int) -> str:
             f"| {sum(o.steps for o in runs) / n:.1f} "
             f"| {sum(o.input_tokens for o in runs) / n:,.0f} / "
             f"{sum(o.output_tokens for o in runs) / n:,.0f} "
-            f"| {_dollars(sum(o.cost_usd or 0 for o in runs) / n)} "
+            f"| {format_usd(sum(o.cost_usd or 0 for o in runs) / n)} "
             f"| {sum(o.duration_s for o in runs) / n:.0f}s |"
         )
     passed = sum(o.passed for o in outcomes)
@@ -185,16 +185,12 @@ def summarize(outcomes: Sequence[Outcome], model: str, trials: int) -> str:
             f"## `{model}`: {passed}/{total} passed ({passed / total:.0%})",
             "",
             f"{trials} trial(s) per task, run on {date}. A task passes when its hidden tests pass. "
-            f"Total cost {_dollars(total_cost)}, estimated at list prices.",
+            f"Total cost {format_usd(total_cost)}, estimated at list prices.",
             "",
             *rows,
             "",
         ]
     )
-
-
-def _dollars(value: float) -> str:
-    return f"${value:.3f}"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -223,14 +219,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     for task in tasks:
         for trial in range(1, args.trials + 1):
             outcome = run_trial(
-                task, client, model, trial, console, verbose=args.verbose, traces=args.traces
+                task, client, trial, console, verbose=args.verbose, traces=args.traces
             )
             outcomes.append(outcome)
             mark = "[green]✓[/green]" if outcome.passed else "[red]✗[/red]"
             console.print(
                 f"{mark} {task.id:<22} trial {trial}  {outcome.agent_status:<20} "
                 f"{outcome.steps:>2} steps  {outcome.duration_s:>5.0f}s  "
-                f"{_dollars(outcome.cost_usd or 0)}"
+                f"{format_usd(outcome.cost_usd or 0)}"
             )
 
     report = summarize(outcomes, model, args.trials)

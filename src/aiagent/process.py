@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from aiagent.text import truncate_middle
+
 # Environment variables whose names look like credentials are not passed to
 # code the agent runs; model-written code should never see the API key.
 SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL", re.IGNORECASE)
@@ -20,16 +22,6 @@ def scrubbed_env() -> dict[str, str]:
     env = {name: value for name, value in os.environ.items() if not SECRET_NAME.search(name)}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
-
-
-def truncate_middle(text: str, max_chars: int) -> str:
-    """Shorten text by cutting the middle; errors usually sit at the end."""
-    if len(text) <= max_chars:
-        return text
-    head = max_chars // 4
-    tail = max_chars - head
-    skipped = len(text) - head - tail
-    return f"{text[:head]}\n[... {skipped} characters omitted ...]\n{text[-tail:]}"
 
 
 def _decode(output: str | bytes | None) -> str:
@@ -55,14 +47,21 @@ class CommandResult:
         argv = ["python" if arg == sys.executable else arg for arg in self.argv]
         return shlex.join(argv)
 
+    @property
+    def status(self) -> str:
+        return "timed out" if self.timed_out else f"exit code {self.exit_code}"
+
     def format(self, max_chars: int) -> str:
-        status = "timed out" if self.timed_out else f"exit code {self.exit_code}"
-        parts = [f"$ {self.display_command}", f"[{status}]"]
-        if self.stdout.strip():
-            parts.append("--- stdout ---\n" + truncate_middle(self.stdout.rstrip(), max_chars))
-        if self.stderr.strip():
-            parts.append("--- stderr ---\n" + truncate_middle(self.stderr.rstrip(), max_chars))
-        if not self.stdout.strip() and not self.stderr.strip():
+        """Command, status and output, with stdout and stderr sharing ``max_chars``."""
+        streams = [
+            (name, text.rstrip())
+            for name, text in [("stdout", self.stdout), ("stderr", self.stderr)]
+            if text.strip()
+        ]
+        parts = [f"$ {self.display_command}", f"[{self.status}]"]
+        for name, text in streams:
+            parts.append(f"--- {name} ---\n" + truncate_middle(text, max_chars // len(streams)))
+        if not streams:
             parts.append("(no output)")
         return "\n".join(parts)
 

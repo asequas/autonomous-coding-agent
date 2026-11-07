@@ -6,28 +6,21 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-IGNORED_DIRS = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".venv",
-        "venv",
-        "env",
-        "__pycache__",
-        "node_modules",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".tox",
-        "build",
-        "dist",
-    }
-)
-
-
 # Readable, but never writable: changes here could run code outside the agent
 # (git hooks and config, packages in a virtualenv).
 PROTECTED_DIRS = frozenset({".git", ".hg", ".svn", ".venv", "venv", "node_modules"})
+
+# Skipped when listing and searching: protected dirs plus caches and build output.
+IGNORED_DIRS = PROTECTED_DIRS | {
+    "env",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    "build",
+    "dist",
+}
 
 
 class SandboxError(ValueError):

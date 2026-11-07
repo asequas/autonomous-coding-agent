@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import shlex
 import sys
 from pathlib import Path
@@ -32,7 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-C", "--workdir", type=Path, default=Path("."), help="Project directory (the sandbox)."
     )
     run.add_argument("-m", "--model", help="Gemini model (default: $AIAGENT_MODEL or built-in).")
-    run.add_argument("--max-steps", type=int, default=30, help="Maximum model turns.")
+    run.add_argument(
+        "--max-steps", type=int, default=AgentConfig.max_steps, help="Maximum model turns."
+    )
     run.add_argument(
         "--test-command",
         help="Command that verifies the work, e.g. 'python -m pytest -q'. Auto-detected if unset.",
@@ -61,35 +64,31 @@ def main(argv: list[str] | None = None) -> int:
     try:
         Workspace(args.workdir)
     except SandboxError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(str(exc), style="red", markup=False)
         return 2
 
     config = AgentConfig(
         workdir=args.workdir,
-        model=args.model or default_model(),
         max_steps=args.max_steps,
         test_command=tuple(shlex.split(args.test_command)) if args.test_command else None,
         verify=not args.no_verify,
     )
-    trace = JsonlTrace(args.trace) if args.trace else None
-    observers: list[AgentObserver] = [RichReporter(console, args.verbose)]
-    if trace:
-        observers.append(trace)
-
-    agent = Agent(
-        GeminiClient(api_key, config.model),
-        config,
-        approve=None if args.yes else InteractiveApprover(console),
-        observers=observers,
-    )
-    try:
-        result = agent.run(args.task)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted.[/yellow]")
-        return 130
-    finally:
-        if trace:
-            trace.close()
-        if args.record:
-            console.save_svg(str(args.record), title="aiagent")
+    with contextlib.ExitStack() as stack:
+        observers: list[AgentObserver] = [RichReporter(console, args.verbose)]
+        if args.trace:
+            observers.append(stack.enter_context(JsonlTrace(args.trace)))
+        agent = Agent(
+            GeminiClient(api_key, args.model or default_model()),
+            config,
+            approve=None if args.yes else InteractiveApprover(console),
+            observers=observers,
+        )
+        try:
+            result = agent.run(args.task)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+            return 130
+        finally:
+            if args.record:
+                console.save_svg(str(args.record), title="aiagent")
     return 0 if result.succeeded else 1

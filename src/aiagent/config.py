@@ -31,6 +31,10 @@ def default_model() -> str:
     return os.environ.get("AIAGENT_MODEL", DEFAULT_MODEL)
 
 
+def format_usd(value: float) -> str:
+    return f"${value:.3f}"
+
+
 API_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
@@ -53,7 +57,6 @@ def load_api_key() -> str | None:
 @dataclass(frozen=True)
 class AgentConfig:
     workdir: Path
-    model: str = DEFAULT_MODEL
     max_steps: int = 30
     # Largest chunk of a file returned by a single read_file call.
     max_read_chars: int = 20_000

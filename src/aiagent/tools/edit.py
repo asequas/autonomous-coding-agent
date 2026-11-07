@@ -8,10 +8,8 @@ from pathlib import Path
 
 from aiagent.patching import apply_patch as apply_patch_text
 from aiagent.patching import make_diff
-from aiagent.tools import Tool, ToolContext, ToolError, schema
+from aiagent.tools import Tool, ToolContext, ToolError, ToolResult, schema
 from aiagent.tools.files import read_text
-
-MAX_DIFF_CHARS = 4_000
 
 
 def validate_python(path: str, text: str) -> None:
@@ -37,14 +35,20 @@ class Edit:
     new: str
     verb: str
 
-    def describe(self) -> str:
-        diff = make_diff(self.old, self.new, self.rel)
-        body = diff.splitlines()[2:]  # skip the ---/+++ file headers
+    @property
+    def diff(self) -> str:
+        return make_diff(self.old, self.new, self.rel)
+
+    def summary(self) -> str:
+        body = self.diff.splitlines()[2:]  # skip the ---/+++ file headers
         added = sum(line.startswith("+") for line in body)
         removed = sum(line.startswith("-") for line in body)
-        if len(diff) > MAX_DIFF_CHARS:
-            diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated]"
-        return f"{self.verb} {self.rel} (+{added} -{removed}).\n{diff}"
+        return f"{self.verb} {self.rel} (+{added} -{removed})."
+
+    def result(self) -> ToolResult:
+        # The model wrote the change itself, so it only needs the summary; the
+        # diff goes to the UI and trace through ``detail``.
+        return ToolResult(True, self.summary(), detail=self)
 
 
 def plan_patch(ctx: ToolContext, path: str, patch: str) -> Edit:
@@ -73,28 +77,28 @@ def _validated(ctx: ToolContext, target: Path, old: str, new: str, verb: str) ->
     return Edit(target, rel, old, new, verb)
 
 
-def _commit(ctx: ToolContext, edit: Edit) -> str:
+def _commit(ctx: ToolContext, edit: Edit) -> ToolResult:
     edit.target.parent.mkdir(parents=True, exist_ok=True)
     edit.target.write_text(edit.new, encoding="utf-8")
     ctx.changed_files.add(edit.rel)
     ctx.edit_count += 1
-    return edit.describe()
+    return edit.result()
 
 
-def apply_patch(ctx: ToolContext, path: str, patch: str) -> str:
+def apply_patch(ctx: ToolContext, path: str, patch: str) -> ToolResult:
     return _commit(ctx, plan_patch(ctx, path, patch))
 
 
-def write_file(ctx: ToolContext, path: str, content: str) -> str:
+def write_file(ctx: ToolContext, path: str, content: str) -> ToolResult:
     return _commit(ctx, plan_write(ctx, path, content))
 
 
-def preview_patch(ctx: ToolContext, path: str, patch: str) -> str:
-    return plan_patch(ctx, path, patch).describe()
+def preview_patch(ctx: ToolContext, path: str, patch: str) -> ToolResult:
+    return plan_patch(ctx, path, patch).result()
 
 
-def preview_write(ctx: ToolContext, path: str, content: str) -> str:
-    return plan_write(ctx, path, content).describe()
+def preview_write(ctx: ToolContext, path: str, content: str) -> ToolResult:
+    return plan_write(ctx, path, content).result()
 
 
 TOOLS = [

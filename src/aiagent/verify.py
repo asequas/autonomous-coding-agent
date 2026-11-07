@@ -5,53 +5,61 @@ from __future__ import annotations
 import importlib.util
 import sys
 from dataclasses import dataclass
+from typing import Literal
 
+from aiagent.config import AgentConfig
 from aiagent.process import CommandResult, run_command
-from aiagent.tools import ToolContext
+from aiagent.sandbox import Workspace
 
+PYTEST_ARGV = (sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider")
+UNITTEST_ARGV = (sys.executable, "-m", "unittest", "discover", "-p", "test*.py")
 PYTEST_NO_TESTS_COLLECTED = 5
+
+Status = Literal["passed", "failed", "no_tests", "declined"]
+
+SUMMARIES: dict[Status, str] = {
+    "no_tests": "No tests found; the change could not be verified.",
+    "declined": "Verification skipped: the user declined to run the tests.",
+}
 
 
 @dataclass(frozen=True)
 class Verification:
-    passed: bool | None  # None: there was nothing to run, or the user declined
-    command: CommandResult | None
-    declined: bool = False
+    status: Status
+    command: CommandResult | None = None
 
     def summary(self, max_chars: int) -> str:
-        if self.declined:
-            return "Verification skipped: the user declined to run the tests."
-        if self.command is None:
-            return "No test command found; the change could not be verified."
-        return self.command.format(max_chars)
+        if self.command is not None and self.status in ("passed", "failed"):
+            return self.command.format(max_chars)
+        return SUMMARIES.get(self.status, "No tests found; the change could not be verified.")
 
 
-def detect_test_command(ctx: ToolContext) -> tuple[str, ...] | None:
+def detect_test_command(workspace: Workspace, config: AgentConfig) -> tuple[str, ...] | None:
     """Pick a test command from the files in the workspace.
 
     pytest-style names (``test_*.py``, ``*_test.py``, ``conftest.py``) use pytest
     when it is installed; any other ``test*.py`` falls back to unittest discovery.
     """
-    if ctx.config.test_command is not None:
-        return ctx.config.test_command
+    if config.test_command is not None:
+        return config.test_command
 
-    names = [path.name for path in ctx.workspace.iter_files() if path.suffix == ".py"]
+    names = [path.name for path in workspace.iter_files() if path.suffix == ".py"]
     pytest_style = any(
         name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"
         for name in names
     )
     if pytest_style and importlib.util.find_spec("pytest") is not None:
-        return (sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider")
+        return PYTEST_ARGV
     if any(name.startswith("test") for name in names):
-        return (sys.executable, "-m", "unittest", "discover", "-p", "test*.py")
+        return UNITTEST_ARGV
     return None
 
 
-def run_verification(ctx: ToolContext) -> Verification:
-    argv = detect_test_command(ctx)
+def run_verification(workspace: Workspace, config: AgentConfig) -> Verification:
+    argv = detect_test_command(workspace, config)
     if argv is None:
-        return Verification(passed=None, command=None)
-    result = run_command(argv, ctx.workspace.root, ctx.config.command_timeout)
-    if result.exit_code == PYTEST_NO_TESTS_COLLECTED and "pytest" in argv:
-        return Verification(passed=None, command=result)
-    return Verification(passed=result.ok, command=result)
+        return Verification("no_tests")
+    result = run_command(argv, workspace.root, config.command_timeout)
+    if argv == PYTEST_ARGV and result.exit_code == PYTEST_NO_TESTS_COLLECTED:
+        return Verification("no_tests", result)
+    return Verification("passed" if result.ok else "failed", result)

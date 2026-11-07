@@ -11,13 +11,15 @@ from rich.table import Table
 from rich.text import Text
 
 from aiagent.agent import AgentObserver, RunResult
-from aiagent.config import AgentConfig
+from aiagent.config import AgentConfig, format_usd
 from aiagent.llm import ModelTurn, ToolCall
+from aiagent.process import CommandResult
 from aiagent.tools import ToolResult
+from aiagent.tools.edit import Edit
 from aiagent.verify import Verification
 
-EDIT_TOOLS = frozenset({"apply_patch", "write_file"})
 STATUS_STYLE = {"completed": "bold green", "verification_failed": "bold red"}
+MAX_DIFF_LINES = 80
 
 
 def describe_call(call: ToolCall, width: int | None = 60) -> str:
@@ -34,25 +36,42 @@ def describe_call(call: ToolCall, width: int | None = 60) -> str:
     return f"{call.name}({', '.join(parts)})"
 
 
-def print_edit(console: Console, output: str, mark: str = "✓", style: str = "green") -> None:
-    """Print an edit tool's "summary line + unified diff" output."""
-    summary, _, diff = output.partition("\n")
-    console.print(Text(f"  {mark} {summary}", style=style))
-    if diff:
-        console.print(Syntax(diff, "diff", theme="ansi_dark", background_color="default"))
+def print_edit(console: Console, edit: Edit, mark: str = "✓", style: str = "green") -> None:
+    console.print(Text(f"  {mark} {edit.summary()}", style=style))
+    lines = edit.diff.splitlines()
+    if len(lines) > MAX_DIFF_LINES:
+        lines = [*lines[:MAX_DIFF_LINES], f"… {len(lines) - MAX_DIFF_LINES} more lines"]
+    console.print(Syntax("\n".join(lines), "diff", theme="ansi_dark", background_color="default"))
+
+
+def print_command(console: Console, command: CommandResult, verbose: bool) -> None:
+    console.print(Text(f"  [{command.status}]", style="green" if command.ok else "yellow"))
+    if verbose or not command.ok:
+        output = (command.stdout + command.stderr).rstrip().splitlines()[-12:]
+        console.print(Text("\n".join("    " + line for line in output), style="dim"))
+
+
+def verification_line(verification: Verification) -> Text:
+    command = verification.command
+    shown = Text(command.display_command) if command else Text()
+    if verification.status == "passed":
+        return Text("✓ verified: ", style="green") + shown
+    if verification.status == "failed":
+        return Text("✗ verification failed: ", style="red") + shown
+    if verification.status == "declined":
+        return Text("⚠ tests not run (declined); change is unverified", style="yellow")
+    return Text("⚠ no tests found; change is unverified", style="yellow")
 
 
 class RichReporter(AgentObserver):
     def __init__(self, console: Console, verbose: bool = False) -> None:
         self.console = console
         self.verbose = verbose
-        self.model = ""
 
-    def on_start(self, task: str, config: AgentConfig) -> None:
-        self.model = config.model
+    def on_start(self, task: str, config: AgentConfig, model: str) -> None:
         body = Group(
             Text(task, style="bold"),
-            Text(f"workspace: {config.workdir}   model: {config.model}", style="dim"),
+            Text(f"workspace: {config.workdir}   model: {model}", style="dim"),
         )
         self.console.print(Panel(body, title="aiagent", title_align="left", border_style="cyan"))
 
@@ -69,33 +88,22 @@ class RichReporter(AgentObserver):
         self.console.print(Text("→ ", style="cyan") + Text(describe_call(call)))
 
     def on_tool_result(self, call: ToolCall, result: ToolResult) -> None:
+        detail = result.detail
         if not result.ok:
             self.console.print(Text("  ✗ " + _first_lines(result.output, 6), style="red"))
-            return
-        if call.name in EDIT_TOOLS:
-            print_edit(self.console, result.output)
-        elif call.name in {"run_python", "run_tests"}:
-            failed = "[exit code 0]" not in result.output
-            status = result.output.splitlines()[1] if "\n" in result.output else result.output
-            self.console.print(Text(f"  {status}", style="yellow" if failed else "green"))
-            if self.verbose or failed:
-                self.console.print(Text(_last_lines(result.output, 12), style="dim"))
+        elif isinstance(detail, Edit):
+            print_edit(self.console, detail)
+        elif isinstance(detail, CommandResult):
+            print_command(self.console, detail, self.verbose)
+        elif isinstance(detail, Verification):
+            self.console.print(Text("  ") + verification_line(detail))
+            if detail.command and (self.verbose or detail.status == "failed"):
+                print_command(self.console, detail.command, verbose=True)
         elif self.verbose:
             self.console.print(Text(f"  ✓ {len(result.output.splitlines())} lines", style="dim"))
 
     def on_verification(self, verification: Verification) -> None:
-        command = verification.command
-        if verification.declined:
-            line = Text("⚠ tests not run (declined); change is unverified", style="yellow")
-        elif command is None:
-            line = Text("⚠ no tests found; change is unverified", style="yellow")
-        elif verification.passed:
-            line = Text("✓ verified: ", style="green") + Text(command.display_command)
-        elif verification.passed is None:
-            line = Text("⚠ test command found no tests", style="yellow")
-        else:
-            line = Text("✗ verification failed: ", style="red") + Text(command.display_command)
-        self.console.print(line)
+        self.console.print(verification_line(verification))
 
     def on_finish(self, result: RunResult) -> None:
         self.console.print()
@@ -116,9 +124,9 @@ class RichReporter(AgentObserver):
             f"{usage.input_tokens:,} in ({usage.cached_tokens:,} cached) / "
             f"{usage.output_tokens:,} out",
         )
-        cost = usage.cost(self.model)
+        cost = usage.cost(result.model)
         if cost is not None:
-            table.add_row("cost", f"~${cost:.3f} (estimated at list prices)")
+            table.add_row("cost", f"~{format_usd(cost)} (estimated at list prices)")
         table.add_row("time", f"{result.duration_s:.1f}s")
         self.console.print(table)
 
@@ -133,9 +141,9 @@ class InteractiveApprover:
     def __call__(self, call: ToolCall, preview: ToolResult | None) -> bool:
         if self.approve_all:
             return True
-        if preview is not None and preview.ok:
-            print_edit(self.console, preview.output, mark="proposed:", style="cyan")
-        elif preview is not None:
+        if preview is not None and isinstance(preview.detail, Edit):
+            print_edit(self.console, preview.detail, mark="proposed:", style="cyan")
+        elif preview is not None and not preview.ok:
             self.console.print(Text("  this call will fail: " + preview.output, style="red"))
         # A Text prompt is never parsed as markup, so model-chosen arguments show verbatim.
         answer = Prompt.ask(
@@ -151,10 +159,3 @@ class InteractiveApprover:
 def _first_lines(text: str, count: int) -> str:
     lines = text.splitlines()
     return "\n    ".join(lines[:count]) + ("\n    …" if len(lines) > count else "")
-
-
-def _last_lines(text: str, count: int) -> str:
-    lines = text.splitlines()[2:]  # skip the "$ command" and status lines
-    shown = lines[-count:]
-    prefix = ["    …"] if len(lines) > count else []
-    return "\n".join([*prefix, *("    " + line for line in shown)])

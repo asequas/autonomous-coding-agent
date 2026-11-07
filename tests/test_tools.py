@@ -3,6 +3,7 @@ import sys
 from conftest import make_ctx, write
 
 from aiagent.tools import ToolContext, default_registry
+from aiagent.tools.edit import Edit
 
 REGISTRY = default_registry()
 
@@ -57,8 +58,9 @@ def test_apply_patch_edits_and_reports_diff(ctx: ToolContext) -> None:
     write(ctx, "m.py", "x = 1\ny = 2\n")
     result = call(ctx, "apply_patch", path="m.py", patch=" x = 1\n-y = 2\n+y = 3\n")
     assert result.ok
-    assert result.output.startswith("Patched m.py (+1 -1).")
-    assert "+y = 3" in result.output
+    # The model gets a one-line summary; the diff travels as structured detail.
+    assert result.output == "Patched m.py (+1 -1)."
+    assert isinstance(result.detail, Edit) and "+y = 3" in result.detail.diff
     assert (ctx.workspace.root / "m.py").read_text() == "x = 1\ny = 3\n"
     assert ctx.changed_files == {"m.py"}
     assert ctx.edit_count == 1
@@ -152,7 +154,8 @@ def test_protected_directories_are_readable_but_not_writable(ctx: ToolContext) -
 def test_preview_describes_an_edit_without_writing_it(ctx: ToolContext) -> None:
     write(ctx, "m.py", "x = 1\n")
     preview = REGISTRY.preview("apply_patch", {"path": "m.py", "patch": "-x = 1\n+x = 2\n"}, ctx)
-    assert preview is not None and preview.ok and "+x = 2" in preview.output
+    assert preview is not None and preview.ok
+    assert isinstance(preview.detail, Edit) and "+x = 2" in preview.detail.diff
     assert (ctx.workspace.root / "m.py").read_text() == "x = 1\n"
     assert ctx.changed_files == set() and ctx.edit_count == 0
 
@@ -166,3 +169,17 @@ def test_preview_reports_edits_that_would_fail(ctx: ToolContext) -> None:
     bad = REGISTRY.preview("apply_patch", {"path": "m.py", "patch": "-x = 1\n+x = (\n"}, ctx)
     assert bad is not None and not bad.ok and "not be valid Python" in bad.output
     assert REGISTRY.preview("read_file", {"path": "m.py"}, ctx) is None
+
+
+def test_run_tests_records_its_result_for_reuse(ctx: ToolContext) -> None:
+    write(ctx, "test_ok.py", "def test_ok():\n    assert True\n")
+    result = call(ctx, "run_tests")
+    assert result.ok and ctx.last_tests is not None
+    edit_count, verification = ctx.last_tests
+    assert edit_count == 0 and verification.status == "passed"
+
+
+def test_search_code_truncates_long_lines(ctx: ToolContext) -> None:
+    write(ctx, "min.js", "x" * 5000 + "needle\n")
+    output = call(ctx, "search_code", pattern="needle").output
+    assert len(output) < 300

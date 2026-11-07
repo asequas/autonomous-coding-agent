@@ -8,6 +8,7 @@ from aiagent.agent import Agent, AgentObserver
 from aiagent.config import AgentConfig
 from aiagent.llm import LLMError, Message, ModelTurn, ScriptedClient, ToolCall, Usage
 from aiagent.tools import ToolContext, ToolResult
+from aiagent.tools.edit import Edit
 
 BUGGY = "def add(a, b):\n    return a - b\n"
 TEST = "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
@@ -46,7 +47,7 @@ class Recorder(AgentObserver):
         self.events.append(f"call:{call.name}")
 
     def on_verification(self, verification: Any) -> None:
-        self.events.append(f"verify:{verification.passed}")
+        self.events.append(f"verify:{verification.status}")
 
 
 def test_end_to_end_bug_fix(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -66,11 +67,11 @@ def test_end_to_end_bug_fix(tmp_path) -> None:  # type: ignore[no-untyped-def]
     assert result.status == "completed", result
     assert result.message == "Fixed add() to use +."
     assert result.changed_files == ["calc.py"]
-    assert result.verification is not None and result.verification.passed is True
+    assert result.verification is not None and result.verification.status == "passed"
     assert result.steps == 5 and result.tool_calls == 4
     assert result.usage == Usage(50, 25)
     assert (ctx.workspace.root / "calc.py").read_text() == "def add(a, b):\n    return a + b\n"
-    assert recorder.events[-1] == "verify:True"
+    assert recorder.events[-1] == "verify:passed"
     assert client.received[0] == "Fix the failing test."
     assert all(r.ok for msg in client.received[1:] for r in tool_results(msg))
 
@@ -184,7 +185,7 @@ def test_verification_needs_approval(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     """Running the tests executes repo code, so declining run_tests must also skip verification."""
     ctx = project(tmp_path)
 
-    def must_not_run(_ctx: ToolContext) -> None:
+    def must_not_run(*_args: object) -> None:
         raise AssertionError("verification ran without approval")
 
     monkeypatch.setattr(agent_module, "run_verification", must_not_run)
@@ -194,8 +195,7 @@ def test_verification_needs_approval(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert result.status == "completed"
-    assert result.verification is not None and result.verification.declined
-    assert result.verification.passed is None
+    assert result.verification is not None and result.verification.status == "declined"
     assert (ctx.workspace.root / "calc.py").read_text().endswith("return a + b\n")
 
 
@@ -214,5 +214,21 @@ def test_approver_sees_a_preview_before_anything_is_written(tmp_path) -> None:  
 
     edit_preview, verify_preview = previews
     assert edit_preview is not None and edit_preview.ok
-    assert "+    return a + b" in edit_preview.output
+    assert isinstance(edit_preview.detail, Edit)
+    assert "+    return a + b" in edit_preview.detail.diff
     assert verify_preview is None  # run_tests has nothing to preview
+
+
+def test_recent_passing_test_run_is_reused_for_verification(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    ctx = project(tmp_path)
+
+    def must_not_run(*_args: object) -> None:
+        raise AssertionError("tests were run again although nothing changed")
+
+    # Only the agent's own verification is patched; the run_tests tool still runs them.
+    monkeypatch.setattr(agent_module, "run_verification", must_not_run)
+    client = ScriptedClient([patch(FIX), calls(("run_tests", {})), final()])
+    result = Agent(client, ctx.config).run("Fix it.")
+    assert result.verification is not None and result.verification.status == "passed"

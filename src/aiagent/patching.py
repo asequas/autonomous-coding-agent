@@ -22,6 +22,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from aiagent.text import format_numbered
+
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 FILE_HEADER_PREFIXES = ("--- ", "+++ ", "diff ", "index ")
 
@@ -190,7 +192,7 @@ def _mismatch_message(index: int, hunk: Hunk, lines: list[str], hint: int) -> st
     best_pos, best_score = _closest_window(lines, before)
     if best_pos is not None and best_score >= 0.5:
         window = lines[best_pos : best_pos + len(before)]
-        shown = "\n".join(f"{best_pos + i + 1:>5} | {text}" for i, text in enumerate(window[:12]))
+        shown = format_numbered(window[:12], best_pos + 1)
         parts.append(
             f"The closest match ({best_score:.0%} similar) starts at line {best_pos + 1}:\n{shown}"
         )
@@ -199,12 +201,27 @@ def _mismatch_message(index: int, hunk: Hunk, lines: list[str], hint: int) -> st
 
 
 def _closest_window(lines: list[str], before: list[str]) -> tuple[int | None, float]:
-    target = "\n".join(before)
+    """Find the window of the file most similar to ``before``, comparing whole lines.
+
+    Only windows sharing at least one non-blank line with the hunk are scored.
+    """
+    size = len(before)
+    last_start = max(0, len(lines) - size)
+    wanted = [line.strip() for line in before]
+    wanted_set = {line for line in wanted if line}
+    stripped = [line.strip() for line in lines]
+    starts: set[int] = set()
+    for i, line in enumerate(stripped):
+        if line in wanted_set:
+            starts.update(range(max(0, i - size + 1), min(i, last_start) + 1))
+
+    matcher: difflib.SequenceMatcher[str] = difflib.SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(wanted)
     best_pos: int | None = None
     best_score = 0.0
-    for pos in range(max(1, len(lines) - len(before) + 1)):
-        candidate = "\n".join(lines[pos : pos + len(before)])
-        score = difflib.SequenceMatcher(None, candidate, target, autojunk=False).ratio()
+    for pos in sorted(starts):
+        matcher.set_seq1(stripped[pos : pos + size])
+        score = matcher.ratio()
         if score > best_score:
             best_pos, best_score = pos, score
     return best_pos, best_score

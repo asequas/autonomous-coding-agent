@@ -7,14 +7,13 @@ replays canned turns, which lets the whole agent loop run offline in tests.
 
 from __future__ import annotations
 
-import random
-import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from google import genai
 from google.genai import errors, types
+from google.genai.models import Models
 
 from aiagent.config import PRICES
 from aiagent.tools import Tool, ToolResult
@@ -84,18 +83,18 @@ class LLMClient(Protocol):
 
 
 class GeminiClient:
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        *,
-        max_retries: int = 5,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> None:
+    def __init__(self, api_key: str, model: str, *, max_retries: int = 5) -> None:
         self.model = model
-        self._client = genai.Client(api_key=api_key)
-        self._max_retries = max_retries
-        self._sleep = sleep
+        # The SDK retries rate limits and server errors with exponential backoff and jitter.
+        self.retry_options = types.HttpRetryOptions(
+            attempts=max_retries + 1,
+            initial_delay=1.0,
+            max_delay=30.0,
+            http_status_codes=sorted(RETRYABLE_STATUS),
+        )
+        self._client = genai.Client(
+            api_key=api_key, http_options=types.HttpOptions(retry_options=self.retry_options)
+        )
 
     def start(self, system_prompt: str, tools: Sequence[Tool]) -> GeminiSession:
         config = types.GenerateContentConfig(
@@ -103,7 +102,7 @@ class GeminiClient:
             tools=[types.Tool(function_declarations=[to_declaration(tool) for tool in tools])],
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
-        return GeminiSession(self._client, self.model, config, self._max_retries, self._sleep)
+        return GeminiSession(self._client.models, self.model, config)
 
 
 def to_declaration(tool: Tool) -> types.FunctionDeclaration:
@@ -130,8 +129,12 @@ def to_content(message: Message) -> types.Content:
     return types.Content(role="user", parts=parts)
 
 
+def first_candidate(response: types.GenerateContentResponse) -> types.Candidate | None:
+    return response.candidates[0] if response.candidates else None
+
+
 def parse_response(response: types.GenerateContentResponse) -> ModelTurn:
-    candidate = response.candidates[0] if response.candidates else None
+    candidate = first_candidate(response)
     parts = (candidate.content.parts if candidate and candidate.content else None) or []
 
     text = "".join(part.text for part in parts if part.text and not part.thought)
@@ -159,42 +162,26 @@ def parse_response(response: types.GenerateContentResponse) -> ModelTurn:
 
 
 class GeminiSession:
-    def __init__(
-        self,
-        client: genai.Client,
-        model: str,
-        config: types.GenerateContentConfig,
-        max_retries: int,
-        sleep: Callable[[float], None],
-    ) -> None:
-        self._client = client
+    def __init__(self, models: Models, model: str, config: types.GenerateContentConfig) -> None:
+        self._models = models
         self._model = model
         self._config = config
-        self._max_retries = max_retries
-        self._sleep = sleep
         self.contents: list[types.Content] = []
 
     def send(self, message: Message) -> ModelTurn:
         self.contents.append(to_content(message))
-        response = self._generate()
-        candidate = response.candidates[0] if response.candidates else None
+        try:
+            response = self._models.generate_content(
+                model=self._model, contents=self.contents, config=self._config
+            )
+        except errors.APIError as exc:
+            raise LLMError(f"Gemini API error {exc.code}: {exc.message}") from exc
+        candidate = first_candidate(response)
         if candidate and candidate.content and candidate.content.parts:
             # Append the model's content verbatim: Gemini's thinking models need
             # their thought signatures sent back on the next request.
             self.contents.append(candidate.content)
         return parse_response(response)
-
-    def _generate(self) -> types.GenerateContentResponse:
-        for attempt in range(self._max_retries + 1):
-            try:
-                return self._client.models.generate_content(
-                    model=self._model, contents=self.contents, config=self._config
-                )
-            except errors.APIError as exc:
-                if exc.code not in RETRYABLE_STATUS or attempt == self._max_retries:
-                    raise LLMError(f"Gemini API error {exc.code}: {exc.message}") from exc
-                self._sleep(min(2**attempt, 30) + random.random())
-        raise AssertionError("unreachable")
 
 
 class ScriptedClient:

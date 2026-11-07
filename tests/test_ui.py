@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -7,6 +8,7 @@ from rich.text import Text
 from aiagent import ui
 from aiagent.llm import ToolCall
 from aiagent.tools import ToolResult
+from aiagent.tools.edit import Edit
 
 
 @pytest.fixture
@@ -44,7 +46,8 @@ def test_approval_shows_the_proposed_diff(
     console: Console, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ask_with(monkeypatch, "y")
-    preview = ToolResult(True, "Patched m.py (+1 -1).\n--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@\n-x\n+y")
+    edit = Edit(Path("m.py"), "m.py", "x\n", "y\n", "Patched")
+    preview = edit.result()
     assert ui.InteractiveApprover(console)(ToolCall("apply_patch", {"path": "m.py"}), preview)
     output = console.export_text()
     assert "proposed: Patched m.py (+1 -1)." in output and "+y" in output

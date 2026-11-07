@@ -57,7 +57,7 @@ Approver = Callable[[ToolCall, ToolResult | None], bool]
 class AgentObserver:
     """Hooks for UI and tracing. Every method is a no-op by default."""
 
-    def on_start(self, task: str, config: AgentConfig) -> None: ...
+    def on_start(self, task: str, config: AgentConfig, model: str) -> None: ...
     def on_model_turn(self, step: int, turn: ModelTurn) -> None: ...
     def on_tool_call(self, call: ToolCall) -> None: ...
     def on_tool_result(self, call: ToolCall, result: ToolResult) -> None: ...
@@ -69,6 +69,7 @@ class AgentObserver:
 class RunResult:
     status: str  # completed | verification_failed | step_limit | error
     message: str
+    model: str
     steps: int
     tool_calls: int
     changed_files: list[str]
@@ -100,7 +101,7 @@ class Agent:
     def run(self, task: str) -> RunResult:
         started = time.monotonic()
         ctx = ToolContext(Workspace(self.config.workdir), self.config)
-        self._notify("on_start", task, self.config)
+        self._notify("on_start", task, self.config, self.client.model)
 
         usage = Usage()
         tool_calls = 0
@@ -112,6 +113,7 @@ class Agent:
             result = RunResult(
                 status=status,
                 message=message,
+                model=self.client.model,
                 steps=steps,
                 tool_calls=tool_calls,
                 changed_files=sorted(ctx.changed_files),
@@ -146,12 +148,9 @@ class Agent:
 
             # The model believes it is done; check its work before accepting that.
             if self.config.verify and ctx.changed_files:
-                if self._approved(VERIFY_CALL, ctx):
-                    verification = run_verification(ctx)
-                else:
-                    verification = Verification(passed=None, command=None, declined=True)
+                verification = self._verify(ctx)
                 self._notify("on_verification", verification)
-                if verification.passed is False:
+                if verification.status == "failed":
                     if verify_attempts >= self.config.max_verify_attempts:
                         return finish("verification_failed", turn.text, step)
                     verify_attempts += 1
@@ -186,6 +185,15 @@ class Agent:
 
         self._notify("on_tool_result", call, result)
         return result
+
+    def _verify(self, ctx: ToolContext) -> Verification:
+        # The model often runs the tests just before finishing; reuse that result
+        # if no file has changed since, rather than running the suite twice.
+        if ctx.last_tests and ctx.last_tests[0] == ctx.edit_count:
+            return ctx.last_tests[1]
+        if not self._approved(VERIFY_CALL, ctx):
+            return Verification("declined")
+        return run_verification(ctx.workspace, ctx.config)
 
     def _approved(self, call: ToolCall, ctx: ToolContext) -> bool:
         if self.approve is None:

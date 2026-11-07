@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from aiagent.text import LINE_PREFIX_WIDTH, format_numbered
 from aiagent.tools import Tool, ToolContext, ToolError, schema
 
 MAX_LISTED_FILES = 300
 MAX_SEARCH_MATCHES = 100
 MAX_SEARCH_FILE_BYTES = 1_000_000
+MAX_MATCH_LINE_CHARS = 200
 
 
 def read_text(path: Path) -> str:
@@ -17,10 +19,6 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise ToolError(f"'{path.name}' is not a UTF-8 text file.") from exc
-
-
-def format_numbered(lines: list[str], first_line: int) -> str:
-    return "\n".join(f"{first_line + i:>5} | {line}" for i, line in enumerate(lines))
 
 
 def _human_size(size: int) -> str:
@@ -60,7 +58,7 @@ def read_file(ctx: ToolContext, path: str, start_line: int = 1, end_line: int | 
     selected: list[str] = []
     budget = ctx.config.max_read_chars
     for line in lines[start - 1 : end]:
-        budget -= len(line) + 8
+        budget -= len(line) + LINE_PREFIX_WIDTH + 1
         if budget < 0 and selected:
             break
         selected.append(line)
@@ -88,12 +86,15 @@ def search_code(ctx: ToolContext, pattern: str, directory: str = ".") -> str:
         if path.stat().st_size > MAX_SEARCH_FILE_BYTES:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+            text = read_text(path)
+        except (ToolError, OSError):
+            continue
+        if not regex.search(text):  # most files don't match; skip splitting them
             continue
         for lineno, line in enumerate(text.splitlines(), start=1):
             if regex.search(line):
-                matches.append(f"{ctx.workspace.relative(path)}:{lineno}: {line.strip()}")
+                shown = line.strip()[:MAX_MATCH_LINE_CHARS]
+                matches.append(f"{ctx.workspace.relative(path)}:{lineno}: {shown}")
                 if len(matches) >= MAX_SEARCH_MATCHES:
                     matches.append(f"[Stopped after {MAX_SEARCH_MATCHES} matches.]")
                     return "\n".join(matches)

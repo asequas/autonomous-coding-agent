@@ -4,6 +4,7 @@ import pytest
 from google.genai import errors, types
 
 from aiagent.llm import (
+    GeminiClient,
     GeminiSession,
     LLMError,
     ToolCall,
@@ -87,57 +88,34 @@ def test_parse_response_handles_empty_candidates() -> None:
 class FakeModels:
     def __init__(self, outcomes: list[Any]) -> None:
         self.outcomes = outcomes
-        self.calls = 0
 
     def generate_content(self, **_: Any) -> types.GenerateContentResponse:
-        self.calls += 1
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome  # type: ignore[no-any-return]
 
 
-class FakeClient:
-    def __init__(self, outcomes: list[Any]) -> None:
-        self.models = FakeModels(outcomes)
+def session(*outcomes: Any) -> GeminiSession:
+    return GeminiSession(FakeModels(list(outcomes)), "m", types.GenerateContentConfig())  # type: ignore[arg-type]
 
 
-def api_error(cls: type[errors.APIError], code: int) -> errors.APIError:
-    return cls(code, {"error": {"code": code, "message": "nope", "status": "X"}})
-
-
-def session(outcomes: list[Any], sleeps: list[float]) -> GeminiSession:
-    config = types.GenerateContentConfig()
-    return GeminiSession(FakeClient(outcomes), "m", config, max_retries=3, sleep=sleeps.append)  # type: ignore[arg-type]
-
-
-def test_retries_transient_errors_with_backoff() -> None:
-    sleeps: list[float] = []
-    chat = session(
-        [
-            api_error(errors.ServerError, 503),
-            api_error(errors.ClientError, 429),
-            response(types.Part(text="ok")),
-        ],
-        sleeps,
-    )
+def test_session_keeps_model_content_in_history() -> None:
+    chat = session(response(types.Part(text="ok")))
     assert chat.send("hi").text == "ok"
-    assert len(sleeps) == 2 and 1 <= sleeps[0] < 2 and 2 <= sleeps[1] < 3
-    # The model's reply is kept in history so thought signatures round-trip.
+    # The model's reply is kept verbatim so thought signatures round-trip.
     assert [c.role for c in chat.contents] == ["user", "model"]
 
 
-def test_does_not_retry_client_errors() -> None:
-    sleeps: list[float] = []
-    chat = session([api_error(errors.ClientError, 400)], sleeps)
+def test_api_errors_become_llm_errors() -> None:
+    error = errors.ClientError(400, {"error": {"code": 400, "message": "bad", "status": "X"}})
     with pytest.raises(LLMError, match="400"):
-        chat.send("hi")
-    assert sleeps == []
+        session(error).send("hi")
 
 
-def test_gives_up_after_max_retries() -> None:
-    sleeps: list[float] = []
-    chat = session([api_error(errors.ServerError, 500)] * 4, sleeps)
-    with pytest.raises(LLMError, match="500"):
-        chat.send("hi")
-    assert len(sleeps) == 3
+def test_client_retries_transient_errors_via_the_sdk() -> None:
+    client = GeminiClient("fake-key", "gemini-3.8-flash", max_retries=3)
+    options = client.retry_options
+    assert options.attempts == 4
+    assert options.http_status_codes == [429, 500, 502, 503, 504]
+    assert options.max_delay == 30.0

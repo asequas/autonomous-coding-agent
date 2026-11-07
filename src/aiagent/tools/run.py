@@ -5,21 +5,23 @@ from __future__ import annotations
 import sys
 
 from aiagent.process import run_command
-from aiagent.tools import Tool, ToolContext, ToolError, schema
+from aiagent.tools import Tool, ToolContext, ToolError, ToolResult, schema
 from aiagent.verify import run_verification
 
 
-def run_python(ctx: ToolContext, path: str, args: list[str] | None = None) -> str:
+def run_python(ctx: ToolContext, path: str, args: list[str] | None = None) -> ToolResult:
     target = ctx.workspace.resolve(path)
     if not target.is_file() or target.suffix != ".py":
         raise ToolError(f"'{path}' is not a Python file.")
     argv = [sys.executable, ctx.workspace.relative(target), *(str(arg) for arg in args or [])]
     result = run_command(argv, ctx.workspace.root, ctx.config.command_timeout)
-    return result.format(ctx.config.max_output_chars)
+    return ToolResult(True, result.format(ctx.config.max_output_chars), detail=result)
 
 
-def run_tests(ctx: ToolContext) -> str:
-    return run_verification(ctx).summary(ctx.config.max_output_chars)
+def run_tests(ctx: ToolContext) -> ToolResult:
+    verification = run_verification(ctx.workspace, ctx.config)
+    ctx.last_tests = (ctx.edit_count, verification)
+    return ToolResult(True, verification.summary(ctx.config.max_output_chars), detail=verification)
 
 
 TOOLS = [

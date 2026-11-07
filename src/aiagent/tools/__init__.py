@@ -15,6 +15,7 @@ from typing import Any
 from aiagent.config import AgentConfig
 from aiagent.patching import PatchError
 from aiagent.sandbox import SandboxError, Workspace
+from aiagent.verify import Verification
 
 
 class ToolError(Exception):
@@ -29,15 +30,20 @@ class ToolContext:
     # Bumped on every successful edit; lets the agent tell a repeated call from
     # the same call made again after the files changed.
     edit_count: int = 0
+    # The latest test run and the edit_count it saw, so an unchanged tree isn't re-tested.
+    last_tests: tuple[int, Verification] | None = None
 
 
 @dataclass(frozen=True)
 class ToolResult:
     ok: bool
-    output: str
+    output: str  # what the model sees
+    # Structured result for the UI and traces (an Edit, CommandResult or Verification).
+    detail: object | None = None
 
 
-Handler = Callable[..., str]
+# Handlers return the text for the model, or a ToolResult to attach a detail.
+Handler = Callable[..., "str | ToolResult"]
 
 
 @dataclass(frozen=True)
@@ -103,11 +109,12 @@ class ToolRegistry:
         handler = tool.preview if dry_run and tool.preview else tool.handler
         kwargs = {key: value for key, value in args.items() if value is not None}
         try:
-            return ToolResult(True, handler(ctx, **kwargs))
+            result = handler(ctx, **kwargs)
         except (ToolError, SandboxError, PatchError) as exc:
             return ToolResult(False, str(exc))
         except Exception as exc:  # a bug in a tool must not kill the agent loop
             return ToolResult(False, f"{name} failed: {type(exc).__name__}: {exc}")
+        return result if isinstance(result, ToolResult) else ToolResult(True, result)
 
 
 def default_registry() -> ToolRegistry:
