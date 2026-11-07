@@ -163,14 +163,16 @@ def run_trial(
 
 def summarize(outcomes: Sequence[Outcome], model: str, trials: int) -> str:
     rows = [
-        "| Task | Kind | Passed | Avg steps | Avg tokens (in / out) | Avg cost | Avg time |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Task | Kind | Passed | Agent finished | Avg steps | Avg tokens (in / out) | Avg cost "
+        "| Avg time |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for task in dict.fromkeys(o.task for o in outcomes):
         runs = [o for o in outcomes if o.task == task]
         n = len(runs)
         rows.append(
             f"| `{task}` | {runs[0].kind} | {sum(o.passed for o in runs)}/{n} "
+            f"| {', '.join(sorted({o.agent_status for o in runs}))} "
             f"| {sum(o.steps for o in runs) / n:.1f} "
             f"| {sum(o.input_tokens for o in runs) / n:,.0f} / "
             f"{sum(o.output_tokens for o in runs) / n:,.0f} "
