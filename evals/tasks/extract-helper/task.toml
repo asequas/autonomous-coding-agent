@@ -1,0 +1,6 @@
+kind = "refactor"
+prompt = """
+format_user and format_admin in records.py duplicate their normalisation logic. Extract it
+into a helper `normalize_contact(record) -> tuple[str, str]` that returns (name, email), and
+use it from both functions. Behaviour must not change.
+"""

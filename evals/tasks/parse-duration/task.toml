@@ -1,0 +1,6 @@
+kind = "bug fix"
+prompt = """
+Bug report: parse_duration("1h30m") returns 3630 seconds; it should be 5400.
+Users also want spaces allowed between the parts, e.g. "1h 30m 15s".
+Fix both and add tests.
+"""

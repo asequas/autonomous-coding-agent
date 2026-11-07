@@ -1,0 +1,5 @@
+kind = "refactor"
+prompt = """
+Rename the function `calc_total` to `compute_total` everywhere in the project: the
+definition, imports, call sites and tests. Do not keep the old name around.
+"""

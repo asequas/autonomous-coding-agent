@@ -1,0 +1,6 @@
+kind = "bug fix"
+prompt = """
+Users report that pagination is broken: paginate(list(range(10)), page=1, per_page=3)
+returns [3, 4, 5] instead of [0, 1, 2], and page_count(list(range(10)), 3) says there are
+3 pages instead of 4. Pages are 1-based. Fix pagination.py.
+"""
