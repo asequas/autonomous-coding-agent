@@ -143,8 +143,6 @@ class InteractiveApprover:
             return True
         if preview is not None and isinstance(preview.detail, Edit):
             print_edit(self.console, preview.detail, mark="proposed:", style="cyan")
-        elif preview is not None and not preview.ok:
-            self.console.print(Text("  this call will fail: " + preview.output, style="red"))
         # A Text prompt is never parsed as markup, so model-chosen arguments show verbatim.
         answer = Prompt.ask(
             Text.assemble("  allow ", (describe_call(call, width=None), "bold"), "?"),

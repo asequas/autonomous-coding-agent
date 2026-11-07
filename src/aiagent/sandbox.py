@@ -9,6 +9,8 @@ from pathlib import Path
 # Readable, but never writable: changes here could run code outside the agent
 # (git hooks and config, packages in a virtualenv).
 PROTECTED_DIRS = frozenset({".git", ".hg", ".svn", ".venv", "venv", "node_modules"})
+# macOS and Windows filesystems are case-insensitive: ".GIT/hooks" is ".git/hooks".
+_PROTECTED_FOLDED = frozenset(name.casefold() for name in PROTECTED_DIRS)
 
 # Skipped when listing and searching: protected dirs plus caches and build output.
 IGNORED_DIRS = PROTECTED_DIRS | {
@@ -51,7 +53,7 @@ class Workspace:
         """Like ``resolve``, but also refuse paths inside protected directories."""
         candidate = self.resolve(path)
         for part in candidate.relative_to(self.root).parts:
-            if part in PROTECTED_DIRS:
+            if part.casefold() in _PROTECTED_FOLDED:
                 raise SandboxError(f"'{path}' is inside {part}/, which the agent may not modify.")
         return candidate
 
@@ -67,6 +69,6 @@ class Workspace:
             dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS)
             for name in sorted(filenames):
                 path = Path(dirpath) / name
-                # A symlink inside the tree may still point outside of it.
-                if path.resolve().is_relative_to(self.root):
+                # A symlink may point outside the tree, or nowhere at all.
+                if path.exists() and path.resolve().is_relative_to(self.root):
                     yield path

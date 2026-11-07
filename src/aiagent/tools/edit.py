@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from aiagent.patching import apply_patch as apply_patch_text
@@ -35,7 +36,7 @@ class Edit:
     new: str
     verb: str
 
-    @property
+    @cached_property
     def diff(self) -> str:
         return make_diff(self.old, self.new, self.rel)
 
@@ -82,6 +83,7 @@ def _commit(ctx: ToolContext, edit: Edit) -> ToolResult:
     edit.target.write_text(edit.new, encoding="utf-8")
     ctx.changed_files.add(edit.rel)
     ctx.edit_count += 1
+    ctx.version += 1
     return edit.result()
 
 

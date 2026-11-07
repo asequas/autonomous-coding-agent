@@ -59,8 +59,14 @@ class CommandResult:
             if text.strip()
         ]
         parts = [f"$ {self.display_command}", f"[{self.status}]"]
+        # Budget the shortest stream first, so its unused share goes to the longer one.
+        budgets: dict[str, int] = {}
+        remaining = max_chars
+        for position, (name, text) in enumerate(sorted(streams, key=lambda s: len(s[1]))):
+            budgets[name] = min(len(text), remaining // (len(streams) - position))
+            remaining -= budgets[name]
         for name, text in streams:
-            parts.append(f"--- {name} ---\n" + truncate_middle(text, max_chars // len(streams)))
+            parts.append(f"--- {name} ---\n" + truncate_middle(text, budgets[name]))
         if not streams:
             parts.append("(no output)")
         return "\n".join(parts)

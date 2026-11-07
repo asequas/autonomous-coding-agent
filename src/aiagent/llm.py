@@ -176,6 +176,8 @@ class GeminiSession:
             )
         except errors.APIError as exc:
             raise LLMError(f"Gemini API error {exc.code}: {exc.message}") from exc
+        except Exception as exc:  # network failures after the SDK's retries, among others
+            raise LLMError(f"Gemini request failed: {type(exc).__name__}: {exc}") from exc
         candidate = first_candidate(response)
         if candidate and candidate.content and candidate.content.parts:
             # Append the model's content verbatim: Gemini's thinking models need

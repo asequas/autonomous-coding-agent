@@ -15,12 +15,13 @@ def run_python(ctx: ToolContext, path: str, args: list[str] | None = None) -> To
         raise ToolError(f"'{path}' is not a Python file.")
     argv = [sys.executable, ctx.workspace.relative(target), *(str(arg) for arg in args or [])]
     result = run_command(argv, ctx.workspace.root, ctx.config.command_timeout)
+    ctx.version += 1  # the script may have changed files
     return ToolResult(True, result.format(ctx.config.max_output_chars), detail=result)
 
 
 def run_tests(ctx: ToolContext) -> ToolResult:
     verification = run_verification(ctx.workspace, ctx.config)
-    ctx.last_tests = (ctx.edit_count, verification)
+    ctx.last_tests = (ctx.version, verification)
     return ToolResult(True, verification.summary(ctx.config.max_output_chars), detail=verification)
 
 

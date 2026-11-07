@@ -14,6 +14,7 @@ from aiagent.sandbox import Workspace
 PYTEST_ARGV = (sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider")
 UNITTEST_ARGV = (sys.executable, "-m", "unittest", "discover", "-p", "test*.py")
 PYTEST_NO_TESTS_COLLECTED = 5
+UNITTEST_NO_TESTS = "Ran 0 tests"
 
 Status = Literal["passed", "failed", "no_tests", "declined"]
 
@@ -55,11 +56,18 @@ def detect_test_command(workspace: Workspace, config: AgentConfig) -> tuple[str,
     return None
 
 
+def _ran_no_tests(argv: tuple[str, ...], result: CommandResult) -> bool:
+    # Covers custom --test-command values too, e.g. "uv run pytest".
+    if "pytest" in argv and result.exit_code == PYTEST_NO_TESTS_COLLECTED:
+        return True
+    return "unittest" in argv and UNITTEST_NO_TESTS in result.stderr
+
+
 def run_verification(workspace: Workspace, config: AgentConfig) -> Verification:
     argv = detect_test_command(workspace, config)
     if argv is None:
         return Verification("no_tests")
     result = run_command(argv, workspace.root, config.command_timeout)
-    if argv == PYTEST_ARGV and result.exit_code == PYTEST_NO_TESTS_COLLECTED:
+    if _ran_no_tests(argv, result):
         return Verification("no_tests", result)
     return Verification("passed" if result.ok else "failed", result)

@@ -30,7 +30,9 @@ class ToolContext:
     # Bumped on every successful edit; lets the agent tell a repeated call from
     # the same call made again after the files changed.
     edit_count: int = 0
-    # The latest test run and the edit_count it saw, so an unchanged tree isn't re-tested.
+    # Bumped by anything that may change files: edits, and running code with run_python.
+    version: int = 0
+    # The latest test run and the version it saw, so an unchanged tree isn't re-tested.
     last_tests: tuple[int, Verification] | None = None
 
 

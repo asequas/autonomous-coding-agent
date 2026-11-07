@@ -7,7 +7,6 @@ from rich.text import Text
 
 from aiagent import ui
 from aiagent.llm import ToolCall
-from aiagent.tools import ToolResult
 from aiagent.tools.edit import Edit
 
 
@@ -59,11 +58,3 @@ def test_approve_all_stops_asking(console: Console, monkeypatch: pytest.MonkeyPa
     assert approver(ToolCall("run_tests", {}), None)
     assert approver(ToolCall("run_tests", {}), None)
     assert len(prompts) == 1
-
-
-def test_failing_preview_is_shown_as_an_error(
-    console: Console, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ask_with(monkeypatch, "n")
-    ui.InteractiveApprover(console)(ToolCall("apply_patch", {}), ToolResult(False, "Hunk 1 ..."))
-    assert "this call will fail: Hunk 1" in console.export_text()

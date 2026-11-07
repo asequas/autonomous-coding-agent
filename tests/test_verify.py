@@ -54,3 +54,13 @@ def test_pytest_without_collected_tests_counts_as_no_tests(ctx: ToolContext) -> 
     write(ctx, "conftest.py", "")
     verification = verify(ctx)
     assert verification.status == "no_tests" and verification.command is not None
+
+
+def test_custom_pytest_command_with_no_tests_is_not_a_failure(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ctx = make_ctx(tmp_path, test_command=(sys.executable, "-m", "pytest", "-q"))
+    assert verify(ctx).status == "no_tests"
+
+
+def test_unittest_running_zero_tests_is_not_a_pass(ctx: ToolContext) -> None:
+    write(ctx, "tests.py", "import unittest\n")
+    assert verify(ctx).status == "no_tests"

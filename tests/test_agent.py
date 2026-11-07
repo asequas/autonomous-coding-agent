@@ -232,3 +232,31 @@ def test_recent_passing_test_run_is_reused_for_verification(
     client = ScriptedClient([patch(FIX), calls(("run_tests", {})), final()])
     result = Agent(client, ctx.config).run("Fix it.")
     assert result.verification is not None and result.verification.status == "passed"
+
+
+def test_calls_that_would_fail_are_not_put_to_the_user(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ctx = project(tmp_path)
+    asked: list[str] = []
+
+    def approve(call: ToolCall, preview: ToolResult | None) -> bool:
+        asked.append(call.name)
+        return True
+
+    bad = patch("-this line is not in the file\n+x\n")
+    client = ScriptedClient([bad, final()])
+    Agent(client, ctx.config, approve=approve).run("Fix it.")
+    failed = tool_results(client.received[1])[0]
+    assert not failed.ok and "does not match" in failed.output
+    assert asked == []
+
+
+def test_files_changed_by_run_python_invalidate_the_last_test_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ctx = project(tmp_path)
+    write(ctx, "fix.py", "open('calc.py', 'w').write('def add(a, b):\\n    return 0\\n')\n")
+    client = ScriptedClient(
+        [patch(FIX), calls(("run_tests", {})), calls(("run_python", {"path": "fix.py"})), final()]
+        + [final()] * 3
+    )
+    result = Agent(client, ctx.config).run("Fix it.")
+    # The earlier passing run is stale, so the tests run again and catch the breakage.
+    assert result.status == "verification_failed"

@@ -103,8 +103,9 @@ def validate(tasks: Sequence[Task], console: Console) -> bool:
         with tempfile.TemporaryDirectory() as tmp:
             before = run_hidden_tests(task, prepare(task, Path(tmp) / "start"))
             solved = prepare(task, Path(tmp) / "solved", with_solution=True)
-            after = run_hidden_tests(task, solved)
+            # Before the hidden tests are copied in, or they would be collected too.
             visible = run_verification(Workspace(solved), AgentConfig(workdir=solved))
+            after = run_hidden_tests(task, solved)
         problems = []
         if before.ok:
             problems.append("hidden tests already pass on the starting repo")

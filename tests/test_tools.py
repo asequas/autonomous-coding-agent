@@ -183,3 +183,16 @@ def test_search_code_truncates_long_lines(ctx: ToolContext) -> None:
     write(ctx, "min.js", "x" * 5000 + "needle\n")
     output = call(ctx, "search_code", pattern="needle").output
     assert len(output) < 300
+
+
+def test_protected_directories_are_matched_case_insensitively(ctx: ToolContext) -> None:
+    result = call(ctx, "write_file", path=".GIT/hooks/pre-commit", content="x\n")
+    assert not result.ok and "may not modify" in result.output
+
+
+def test_dangling_symlinks_do_not_break_listing_or_search(ctx: ToolContext) -> None:
+    write(ctx, "a.py", "needle = 1\n")
+    (ctx.workspace.root / "gone.py").symlink_to(ctx.workspace.root / "deleted.py")
+    assert call(ctx, "list_files").ok
+    result = call(ctx, "search_code", pattern="needle")
+    assert result.ok and "a.py:1" in result.output

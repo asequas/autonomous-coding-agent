@@ -119,3 +119,8 @@ def test_client_retries_transient_errors_via_the_sdk() -> None:
     assert options.attempts == 4
     assert options.http_status_codes == [429, 500, 502, 503, 504]
     assert options.max_delay == 30.0
+
+
+def test_network_failures_become_llm_errors() -> None:
+    with pytest.raises(LLMError, match="ConnectionError"):
+        session(ConnectionError("connection reset")).send("hi")

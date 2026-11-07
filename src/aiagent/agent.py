@@ -49,6 +49,7 @@ Rules:
 MAX_IDENTICAL_CALLS = 2
 # Verification runs the project's tests, so it goes through approval like run_tests.
 VERIFY_CALL = ToolCall("run_tests", {})
+DECLINED = ToolResult(False, "The user declined this action. Try another approach.")
 
 # Called before each side-effecting action with the call and, for edits, a dry-run preview.
 Approver = Callable[[ToolCall, ToolResult | None], bool]
@@ -178,8 +179,14 @@ class Agent:
                 f"You have made this exact {call.name} call {seen[key]} times and no file has "
                 "changed since, so the result will be the same. Try a different approach.",
             )
-        elif tool and tool.side_effects and not self._approved(call, ctx):
-            result = ToolResult(False, "The user declined this action. Try another approach.")
+        elif tool and tool.side_effects and self.approve is not None:
+            preview = self.registry.preview(call.name, call.args, ctx)
+            if preview is not None and not preview.ok:
+                result = preview  # it would fail anyway; don't ask the user about a no-op
+            elif self.approve(call, preview):
+                result = self.registry.call(call.name, call.args, ctx)
+            else:
+                result = DECLINED
         else:
             result = self.registry.call(call.name, call.args, ctx)
 
@@ -189,16 +196,11 @@ class Agent:
     def _verify(self, ctx: ToolContext) -> Verification:
         # The model often runs the tests just before finishing; reuse that result
         # if no file has changed since, rather than running the suite twice.
-        if ctx.last_tests and ctx.last_tests[0] == ctx.edit_count:
+        if ctx.last_tests and ctx.last_tests[0] == ctx.version:
             return ctx.last_tests[1]
-        if not self._approved(VERIFY_CALL, ctx):
+        if self.approve is not None and not self.approve(VERIFY_CALL, None):
             return Verification("declined")
         return run_verification(ctx.workspace, ctx.config)
-
-    def _approved(self, call: ToolCall, ctx: ToolContext) -> bool:
-        if self.approve is None:
-            return True
-        return self.approve(call, self.registry.preview(call.name, call.args, ctx))
 
     def _notify(self, event: str, *args: object) -> None:
         for observer in self.observers:
