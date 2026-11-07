@@ -7,9 +7,15 @@ from aiagent import cli
 from aiagent.llm import ModelTurn, ScriptedClient, ToolCall
 
 
+def no_live_calls(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("tests must never call the real Gemini API")
+
+
 @pytest.fixture(autouse=True)
-def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "load_dotenv", lambda *_: None)
+def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    # Run from an empty directory so the developer's own .env (with a real key) is never found.
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+    monkeypatch.setattr(cli, "GeminiClient", no_live_calls)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -29,16 +28,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
-from rich.table import Table
 
-from aiagent.agent import Agent
-from aiagent.config import AgentConfig, default_model
+from aiagent.agent import Agent, AgentObserver
+from aiagent.config import AgentConfig, default_model, load_api_key
 from aiagent.llm import GeminiClient, LLMClient
 from aiagent.process import CommandResult, run_command
 from aiagent.sandbox import Workspace
 from aiagent.tools import ToolContext
+from aiagent.trace import JsonlTrace
 from aiagent.ui import RichReporter
 from aiagent.verify import run_verification
 
@@ -66,7 +64,9 @@ class Outcome:
     steps: int
     tool_calls: int
     input_tokens: int
+    cached_tokens: int
     output_tokens: int
+    cost_usd: float | None
     duration_s: float
 
 
@@ -122,13 +122,27 @@ def validate(tasks: Sequence[Task], console: Console) -> bool:
 
 
 def run_trial(
-    task: Task, client: LLMClient, model: str, trial: int, console: Console, verbose: bool
+    task: Task,
+    client: LLMClient,
+    model: str,
+    trial: int,
+    console: Console,
+    *,
+    verbose: bool = False,
+    traces: Path | None = None,
 ) -> Outcome:
     with tempfile.TemporaryDirectory() as tmp:
         workdir = prepare(task, Path(tmp) / "repo")
         config = AgentConfig(workdir=workdir, model=model)
-        observers = [RichReporter(console, verbose=True)] if verbose else []
-        result = Agent(client, config, observers=observers).run(task.prompt)
+        observers: list[AgentObserver] = [RichReporter(console, verbose=True)] if verbose else []
+        trace = JsonlTrace(traces / f"{task.id}-{trial}.jsonl") if traces else None
+        if trace:
+            observers.append(trace)
+        try:
+            result = Agent(client, config, observers=observers).run(task.prompt)
+        finally:
+            if trace:
+                trace.close()
         check = run_hidden_tests(task, workdir)
     return Outcome(
         task=task.id,
@@ -139,15 +153,17 @@ def run_trial(
         steps=result.steps,
         tool_calls=result.tool_calls,
         input_tokens=result.usage.input_tokens,
+        cached_tokens=result.usage.cached_tokens,
         output_tokens=result.usage.output_tokens,
+        cost_usd=result.usage.cost(model),
         duration_s=round(result.duration_s, 1),
     )
 
 
 def summarize(outcomes: Sequence[Outcome], model: str, trials: int) -> str:
     rows = [
-        "| Task | Kind | Passed | Avg steps | Avg tokens (in / out) | Avg time |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Task | Kind | Passed | Avg steps | Avg tokens (in / out) | Avg cost | Avg time |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for task in dict.fromkeys(o.task for o in outcomes):
         runs = [o for o in outcomes if o.task == task]
@@ -157,21 +173,28 @@ def summarize(outcomes: Sequence[Outcome], model: str, trials: int) -> str:
             f"| {sum(o.steps for o in runs) / n:.1f} "
             f"| {sum(o.input_tokens for o in runs) / n:,.0f} / "
             f"{sum(o.output_tokens for o in runs) / n:,.0f} "
+            f"| {_dollars(sum(o.cost_usd or 0 for o in runs) / n)} "
             f"| {sum(o.duration_s for o in runs) / n:.0f}s |"
         )
     passed = sum(o.passed for o in outcomes)
     total = len(outcomes)
+    total_cost = sum(o.cost_usd or 0 for o in outcomes)
     date = time.strftime("%Y-%m-%d")
     return "\n".join(
         [
             f"## `{model}`: {passed}/{total} passed ({passed / total:.0%})",
             "",
-            f"{trials} trial(s) per task, run on {date}. A task passes when its hidden tests pass.",
+            f"{trials} trial(s) per task, run on {date}. A task passes when its hidden tests pass. "
+            f"Total cost {_dollars(total_cost)}, estimated at list prices.",
             "",
             *rows,
             "",
         ]
     )
+
+
+def _dollars(value: float) -> str:
+    return f"${value:.3f}"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -181,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("-m", "--model", default=None, help="Gemini model to evaluate.")
     parser.add_argument("--validate", action="store_true", help="Check the tasks themselves.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show every agent step.")
+    parser.add_argument("--traces", type=Path, help="Write a JSONL trace per trial to this dir.")
     args = parser.parse_args(argv)
 
     console = Console()
@@ -188,8 +212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.validate:
         return 0 if validate(tasks, console) else 1
 
-    load_dotenv(find_dotenv(usecwd=True))
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = load_api_key()
     if not api_key:
         console.print("[red]GEMINI_API_KEY is not set.[/red]")
         return 2
@@ -199,26 +222,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     outcomes: list[Outcome] = []
     for task in tasks:
         for trial in range(1, args.trials + 1):
-            outcome = run_trial(task, client, model, trial, console, args.verbose)
+            outcome = run_trial(
+                task, client, model, trial, console, verbose=args.verbose, traces=args.traces
+            )
             outcomes.append(outcome)
             mark = "[green]✓[/green]" if outcome.passed else "[red]✗[/red]"
             console.print(
                 f"{mark} {task.id:<22} trial {trial}  {outcome.agent_status:<20} "
-                f"{outcome.steps:>2} steps  {outcome.duration_s:>5.0f}s"
+                f"{outcome.steps:>2} steps  {outcome.duration_s:>5.0f}s  "
+                f"{_dollars(outcome.cost_usd or 0)}"
             )
 
     report = summarize(outcomes, model, args.trials)
     RESULTS_DIR.mkdir(exist_ok=True)
-    stem = RESULTS_DIR / model.replace("/", "_")
-    stem.with_suffix(".md").write_text(report, encoding="utf-8")
-    stem.with_suffix(".json").write_text(
+    # Not Path.with_suffix: "gemini-3.8-flash" would lose ".8-flash" as if it were an extension.
+    name = model.replace("/", "_")
+    (RESULTS_DIR / f"{name}.md").write_text(report, encoding="utf-8")
+    (RESULTS_DIR / f"{name}.json").write_text(
         json.dumps([dataclasses.asdict(o) for o in outcomes], indent=2) + "\n", encoding="utf-8"
     )
 
-    table = Table(show_header=False, box=None)
-    table.add_row(report)
-    console.print(table)
-    console.print(f"[dim]Saved {stem.with_suffix('.md')} and .json[/dim]")
+    console.print(report, markup=False)
+    console.print(f"Saved evals/results/{name}.md and .json", style="dim")
     return 0 if all(o.passed for o in outcomes) else 1
 
 

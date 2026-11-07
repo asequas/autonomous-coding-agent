@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiagent.patching import apply_patch as apply_patch_text
@@ -26,41 +27,74 @@ def validate_python(path: str, text: str) -> None:
         ) from exc
 
 
-def _commit(ctx: ToolContext, target: Path, old: str, new: str, verb: str) -> str:
-    rel = ctx.workspace.relative(target)
-    validate_python(rel, new)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(new, encoding="utf-8")
-    ctx.changed_files.add(rel)
-    ctx.edit_count += 1
+@dataclass(frozen=True)
+class Edit:
+    """A validated change to one file that has not been written yet."""
 
-    diff = make_diff(old, new, rel)
-    body = diff.splitlines()[2:]  # skip the ---/+++ file headers
-    added = sum(line.startswith("+") for line in body)
-    removed = sum(line.startswith("-") for line in body)
-    if len(diff) > MAX_DIFF_CHARS:
-        diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated]"
-    return f"{verb} {rel} (+{added} -{removed}).\n{diff}"
+    target: Path
+    rel: str
+    old: str
+    new: str
+    verb: str
+
+    def describe(self) -> str:
+        diff = make_diff(self.old, self.new, self.rel)
+        body = diff.splitlines()[2:]  # skip the ---/+++ file headers
+        added = sum(line.startswith("+") for line in body)
+        removed = sum(line.startswith("-") for line in body)
+        if len(diff) > MAX_DIFF_CHARS:
+            diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated]"
+        return f"{self.verb} {self.rel} (+{added} -{removed}).\n{diff}"
 
 
-def apply_patch(ctx: ToolContext, path: str, patch: str) -> str:
-    target = ctx.workspace.resolve(path)
+def plan_patch(ctx: ToolContext, path: str, patch: str) -> Edit:
+    target = ctx.workspace.resolve_writable(path)
     if not target.is_file():
         raise ToolError(f"'{path}' does not exist. Use write_file to create new files.")
     old = read_text(target)
     new = apply_patch_text(old, patch)
     if new == old:
         raise ToolError("The patch applied cleanly but did not change the file.")
-    return _commit(ctx, target, old, new, "Patched")
+    return _validated(ctx, target, old, new, "Patched")
 
 
-def write_file(ctx: ToolContext, path: str, content: str) -> str:
-    target = ctx.workspace.resolve(path)
+def plan_write(ctx: ToolContext, path: str, content: str) -> Edit:
+    target = ctx.workspace.resolve_writable(path)
     if target.is_dir():
         raise ToolError(f"'{path}' is a directory.")
     old = read_text(target) if target.exists() else ""
     verb = "Overwrote" if target.exists() else "Created"
-    return _commit(ctx, target, old, content, verb)
+    return _validated(ctx, target, old, content, verb)
+
+
+def _validated(ctx: ToolContext, target: Path, old: str, new: str, verb: str) -> Edit:
+    rel = ctx.workspace.relative(target)
+    validate_python(rel, new)
+    return Edit(target, rel, old, new, verb)
+
+
+def _commit(ctx: ToolContext, edit: Edit) -> str:
+    edit.target.parent.mkdir(parents=True, exist_ok=True)
+    edit.target.write_text(edit.new, encoding="utf-8")
+    ctx.changed_files.add(edit.rel)
+    ctx.edit_count += 1
+    return edit.describe()
+
+
+def apply_patch(ctx: ToolContext, path: str, patch: str) -> str:
+    return _commit(ctx, plan_patch(ctx, path, patch))
+
+
+def write_file(ctx: ToolContext, path: str, content: str) -> str:
+    return _commit(ctx, plan_write(ctx, path, content))
+
+
+def preview_patch(ctx: ToolContext, path: str, patch: str) -> str:
+    return plan_patch(ctx, path, patch).describe()
+
+
+def preview_write(ctx: ToolContext, path: str, content: str) -> str:
+    return plan_write(ctx, path, content).describe()
 
 
 TOOLS = [
@@ -88,6 +122,7 @@ TOOLS = [
             required=["path", "patch"],
         ),
         handler=apply_patch,
+        preview=preview_patch,
         side_effects=True,
     ),
     Tool(
@@ -104,6 +139,7 @@ TOOLS = [
             required=["path", "content"],
         ),
         handler=write_file,
+        preview=preview_write,
         side_effects=True,
     ),
 ]

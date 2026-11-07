@@ -1,11 +1,13 @@
 from typing import Any
 
+import pytest
 from conftest import make_ctx, write
 
+from aiagent import agent as agent_module
 from aiagent.agent import Agent, AgentObserver
 from aiagent.config import AgentConfig
 from aiagent.llm import LLMError, Message, ModelTurn, ScriptedClient, ToolCall, Usage
-from aiagent.tools import ToolContext
+from aiagent.tools import ToolContext, ToolResult
 
 BUGGY = "def add(a, b):\n    return a - b\n"
 TEST = "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
@@ -140,7 +142,7 @@ def test_identical_calls_are_allowed_after_an_edit(tmp_path) -> None:  # type: i
 def test_declined_actions_are_not_executed(tmp_path) -> None:  # type: ignore[no-untyped-def]
     ctx = project(tmp_path)
     client = ScriptedClient([patch(FIX), final()])
-    result = Agent(client, ctx.config, approve=lambda call: False).run("Fix it.")
+    result = Agent(client, ctx.config, approve=lambda call, preview: False).run("Fix it.")
     declined = tool_results(client.received[1])[0]
     assert not declined.ok and "declined" in declined.output
     assert (ctx.workspace.root / "calc.py").read_text() == BUGGY
@@ -151,7 +153,7 @@ def test_read_only_tools_skip_approval(tmp_path) -> None:  # type: ignore[no-unt
     ctx = project(tmp_path)
     asked: list[str] = []
 
-    def approve(call: ToolCall) -> bool:
+    def approve(call: ToolCall, preview: ToolResult | None) -> bool:
         asked.append(call.name)
         return True
 
@@ -176,3 +178,41 @@ def test_llm_errors_end_the_run_cleanly(tmp_path) -> None:  # type: ignore[no-un
 
     result = Agent(Broken([]), AgentConfig(workdir=tmp_path)).run("Hi.")
     assert result.status == "error" and result.message == "quota exceeded"
+
+
+def test_verification_needs_approval(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    """Running the tests executes repo code, so declining run_tests must also skip verification."""
+    ctx = project(tmp_path)
+
+    def must_not_run(_ctx: ToolContext) -> None:
+        raise AssertionError("verification ran without approval")
+
+    monkeypatch.setattr(agent_module, "run_verification", must_not_run)
+    client = ScriptedClient([patch(FIX), final()])
+    result = Agent(client, ctx.config, approve=lambda call, preview: call.name != "run_tests").run(
+        "Fix it."
+    )
+
+    assert result.status == "completed"
+    assert result.verification is not None and result.verification.declined
+    assert result.verification.passed is None
+    assert (ctx.workspace.root / "calc.py").read_text().endswith("return a + b\n")
+
+
+def test_approver_sees_a_preview_before_anything_is_written(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ctx = project(tmp_path)
+    previews: list[ToolResult | None] = []
+
+    def approve(call: ToolCall, preview: ToolResult | None) -> bool:
+        previews.append(preview)
+        if call.name == "apply_patch":
+            assert (ctx.workspace.root / "calc.py").read_text() == BUGGY  # not applied yet
+        return True
+
+    client = ScriptedClient([patch(FIX), final()])
+    Agent(client, ctx.config, approve=approve).run("Fix it.")
+
+    edit_preview, verify_preview = previews
+    assert edit_preview is not None and edit_preview.ok
+    assert "+    return a + b" in edit_preview.output
+    assert verify_preview is None  # run_tests has nothing to preview

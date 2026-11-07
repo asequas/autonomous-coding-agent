@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shlex
 import sys
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 
 from aiagent import __version__
 from aiagent.agent import Agent, AgentObserver
-from aiagent.config import AgentConfig, default_model
+from aiagent.config import AgentConfig, default_model, load_api_key
 from aiagent.llm import GeminiClient
 from aiagent.sandbox import SandboxError, Workspace
 from aiagent.trace import JsonlTrace
@@ -50,11 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv(find_dotenv(usecwd=True))
     args = build_parser().parse_args(argv)
     console = Console(record=args.record is not None)
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = load_api_key()
     if not api_key:
         console.print("[red]GEMINI_API_KEY is not set.[/red] Add it to your environment or .env.")
         return 2

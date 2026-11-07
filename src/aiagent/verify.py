@@ -14,10 +14,13 @@ PYTEST_NO_TESTS_COLLECTED = 5
 
 @dataclass(frozen=True)
 class Verification:
-    passed: bool | None  # None: there was nothing to run
+    passed: bool | None  # None: there was nothing to run, or the user declined
     command: CommandResult | None
+    declined: bool = False
 
     def summary(self, max_chars: int) -> str:
+        if self.declined:
+            return "Verification skipped: the user declined to run the tests."
         if self.command is None:
             return "No test command found; the change could not be verified."
         return self.command.format(max_chars)

@@ -29,6 +29,12 @@ Workflow:
 5. Finish: reply with a short summary of what you changed and how you checked it, without
    calling a tool.
 
+Be efficient; every turn costs time and money:
+- Make independent tool calls in the same turn. For example, read all the files you need at
+  once, or patch several files together.
+- Don't re-read a file you have already read unless it has changed since.
+- Once the tests pass, finish straight away.
+
 Rules:
 - Paths are relative to the project root; nothing outside it is accessible.
 - read_file prefixes each line with its number ("   12 | "). Never copy those prefixes into
@@ -41,8 +47,11 @@ Rules:
 """
 
 MAX_IDENTICAL_CALLS = 2
+# Verification runs the project's tests, so it goes through approval like run_tests.
+VERIFY_CALL = ToolCall("run_tests", {})
 
-Approver = Callable[[ToolCall], bool]
+# Called before each side-effecting action with the call and, for edits, a dry-run preview.
+Approver = Callable[[ToolCall, ToolResult | None], bool]
 
 
 class AgentObserver:
@@ -137,7 +146,10 @@ class Agent:
 
             # The model believes it is done; check its work before accepting that.
             if self.config.verify and ctx.changed_files:
-                verification = run_verification(ctx)
+                if self._approved(VERIFY_CALL, ctx):
+                    verification = run_verification(ctx)
+                else:
+                    verification = Verification(passed=None, command=None, declined=True)
                 self._notify("on_verification", verification)
                 if verification.passed is False:
                     if verify_attempts >= self.config.max_verify_attempts:
@@ -167,13 +179,18 @@ class Agent:
                 f"You have made this exact {call.name} call {seen[key]} times and no file has "
                 "changed since, so the result will be the same. Try a different approach.",
             )
-        elif tool and tool.side_effects and self.approve and not self.approve(call):
+        elif tool and tool.side_effects and not self._approved(call, ctx):
             result = ToolResult(False, "The user declined this action. Try another approach.")
         else:
             result = self.registry.call(call.name, call.args, ctx)
 
         self._notify("on_tool_result", call, result)
         return result
+
+    def _approved(self, call: ToolCall, ctx: ToolContext) -> bool:
+        if self.approve is None:
+            return True
+        return self.approve(call, self.registry.preview(call.name, call.args, ctx))
 
     def _notify(self, event: str, *args: object) -> None:
         for observer in self.observers:

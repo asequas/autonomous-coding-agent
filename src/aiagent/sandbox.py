@@ -25,6 +25,11 @@ IGNORED_DIRS = frozenset(
 )
 
 
+# Readable, but never writable: changes here could run code outside the agent
+# (git hooks and config, packages in a virtualenv).
+PROTECTED_DIRS = frozenset({".git", ".hg", ".svn", ".venv", "venv", "node_modules"})
+
+
 class SandboxError(ValueError):
     """Raised when a path would escape the workspace."""
 
@@ -47,6 +52,14 @@ class Workspace:
         candidate = (self.root / (path or ".")).resolve()
         if not candidate.is_relative_to(self.root):
             raise SandboxError(f"Path '{path}' is outside the workspace.")
+        return candidate
+
+    def resolve_writable(self, path: str) -> Path:
+        """Like ``resolve``, but also refuse paths inside protected directories."""
+        candidate = self.resolve(path)
+        for part in candidate.relative_to(self.root).parts:
+            if part in PROTECTED_DIRS:
+                raise SandboxError(f"'{path}' is inside {part}/, which the agent may not modify.")
         return candidate
 
     def relative(self, path: Path) -> str:

@@ -25,7 +25,10 @@ def response(
             )
         ],
         usage_metadata=types.GenerateContentResponseUsageMetadata(
-            prompt_token_count=100, candidates_token_count=20, thoughts_token_count=7
+            prompt_token_count=100,
+            candidates_token_count=20,
+            thoughts_token_count=7,
+            cached_content_token_count=60,
         ),
     )
 
@@ -72,7 +75,7 @@ def test_parse_response_separates_text_thoughts_and_calls() -> None:
     )
     assert turn.text == "Let me look."
     assert turn.tool_calls == [ToolCall("read_file", {"path": "a.py"}, "x")]
-    assert turn.usage == Usage(100, 27)
+    assert turn.usage == Usage(100, 27, 60)
     assert turn.finish_reason == "STOP"
 
 

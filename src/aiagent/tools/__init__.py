@@ -48,6 +48,8 @@ class Tool:
     handler: Handler
     # Tools with side effects need approval unless the user runs with --yes.
     side_effects: bool = False
+    # Optional dry run that describes what the handler would do, shown when asking approval.
+    preview: Handler | None = None
 
     @property
     def required(self) -> list[str]:
@@ -74,6 +76,18 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def call(self, name: str, args: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
+        return self._invoke(name, args, ctx, dry_run=False)
+
+    def preview(self, name: str, args: Mapping[str, Any], ctx: ToolContext) -> ToolResult | None:
+        """Dry-run a call to show what it would do, or None if the tool has no preview."""
+        tool = self._tools.get(name)
+        if tool is None or tool.preview is None:
+            return None
+        return self._invoke(name, args, ctx, dry_run=True)
+
+    def _invoke(
+        self, name: str, args: Mapping[str, Any], ctx: ToolContext, *, dry_run: bool
+    ) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
             available = ", ".join(sorted(self._tools))
@@ -86,9 +100,10 @@ class ToolRegistry:
         if unknown:
             return ToolResult(False, f"{name}: unexpected argument(s): {', '.join(unknown)}.")
 
+        handler = tool.preview if dry_run and tool.preview else tool.handler
         kwargs = {key: value for key, value in args.items() if value is not None}
         try:
-            return ToolResult(True, tool.handler(ctx, **kwargs))
+            return ToolResult(True, handler(ctx, **kwargs))
         except (ToolError, SandboxError, PatchError) as exc:
             return ToolResult(False, str(exc))
         except Exception as exc:  # a bug in a tool must not kill the agent loop

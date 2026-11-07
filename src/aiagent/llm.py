@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from google import genai
 from google.genai import errors, types
 
+from aiagent.config import PRICES
 from aiagent.tools import Tool, ToolResult
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -34,13 +35,28 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Usage:
-    input_tokens: int = 0
+    input_tokens: int = 0  # includes cached_tokens
     output_tokens: int = 0
+    cached_tokens: int = 0
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
-            self.input_tokens + other.input_tokens, self.output_tokens + other.output_tokens
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cached_tokens + other.cached_tokens,
         )
+
+    def cost(self, model: str) -> float | None:
+        """Estimated USD cost at list prices, or None for a model without a price."""
+        price = PRICES.get(model)
+        if price is None:
+            return None
+        uncached = self.input_tokens - self.cached_tokens
+        return (
+            uncached * price.input
+            + self.cached_tokens * price.cached_input
+            + self.output_tokens * price.output
+        ) / 1_000_000
 
 
 @dataclass(frozen=True)
@@ -133,6 +149,7 @@ def parse_response(response: types.GenerateContentResponse) -> ModelTurn:
         Usage(
             meta.prompt_token_count or 0,
             (meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0),
+            meta.cached_content_token_count or 0,
         )
         if meta
         else Usage()

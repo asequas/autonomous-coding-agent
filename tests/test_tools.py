@@ -136,3 +136,33 @@ def test_every_tool_declares_a_valid_schema() -> None:
         assert tool.parameters["type"] == "object"
         assert set(tool.required) <= set(tool.properties), tool.name
     assert sys.executable  # tools run code with the agent's interpreter
+
+
+def test_protected_directories_are_readable_but_not_writable(ctx: ToolContext) -> None:
+    write(ctx, ".git/config", "[core]\n")
+    assert call(ctx, "read_file", path=".git/config").ok
+    for path in [".git/config", ".venv/lib/site.pth", "pkg/../.git/hooks/pre-commit"]:
+        result = call(ctx, "write_file", path=path, content="x\n")
+        assert not result.ok and "may not modify" in result.output, path
+    patched = call(ctx, "apply_patch", path=".git/config", patch="-[core]\n+[core]\n\tx = 1\n")
+    assert not patched.ok
+    assert (ctx.workspace.root / ".git/config").read_text() == "[core]\n"
+
+
+def test_preview_describes_an_edit_without_writing_it(ctx: ToolContext) -> None:
+    write(ctx, "m.py", "x = 1\n")
+    preview = REGISTRY.preview("apply_patch", {"path": "m.py", "patch": "-x = 1\n+x = 2\n"}, ctx)
+    assert preview is not None and preview.ok and "+x = 2" in preview.output
+    assert (ctx.workspace.root / "m.py").read_text() == "x = 1\n"
+    assert ctx.changed_files == set() and ctx.edit_count == 0
+
+    new = REGISTRY.preview("write_file", {"path": "new.py", "content": "y = 1\n"}, ctx)
+    assert new is not None and new.output.startswith("Created new.py")
+    assert not (ctx.workspace.root / "new.py").exists()
+
+
+def test_preview_reports_edits_that_would_fail(ctx: ToolContext) -> None:
+    write(ctx, "m.py", "x = 1\n")
+    bad = REGISTRY.preview("apply_patch", {"path": "m.py", "patch": "-x = 1\n+x = (\n"}, ctx)
+    assert bad is not None and not bad.ok and "not be valid Python" in bad.output
+    assert REGISTRY.preview("read_file", {"path": "m.py"}, ctx) is None

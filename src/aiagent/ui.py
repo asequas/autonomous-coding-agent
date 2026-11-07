@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -22,7 +20,7 @@ EDIT_TOOLS = frozenset({"apply_patch", "write_file"})
 STATUS_STYLE = {"completed": "bold green", "verification_failed": "bold red"}
 
 
-def describe_call(call: ToolCall, width: int = 60) -> str:
+def describe_call(call: ToolCall, width: int | None = 60) -> str:
     """One-line summary of a tool call; multi-line arguments are reduced to a line count."""
     parts = []
     for key, value in call.args.items():
@@ -30,21 +28,31 @@ def describe_call(call: ToolCall, width: int = 60) -> str:
             rendered = f"<{len(value.splitlines())} lines>"
         else:
             rendered = repr(value)
-            if len(rendered) > width:
+            if width is not None and len(rendered) > width:
                 rendered = rendered[: width - 1] + "…"
         parts.append(f"{key}={rendered}")
     return f"{call.name}({', '.join(parts)})"
+
+
+def print_edit(console: Console, output: str, mark: str = "✓", style: str = "green") -> None:
+    """Print an edit tool's "summary line + unified diff" output."""
+    summary, _, diff = output.partition("\n")
+    console.print(Text(f"  {mark} {summary}", style=style))
+    if diff:
+        console.print(Syntax(diff, "diff", theme="ansi_dark", background_color="default"))
 
 
 class RichReporter(AgentObserver):
     def __init__(self, console: Console, verbose: bool = False) -> None:
         self.console = console
         self.verbose = verbose
+        self.model = ""
 
     def on_start(self, task: str, config: AgentConfig) -> None:
+        self.model = config.model
         body = Group(
             Text(task, style="bold"),
-            Text(f"workspace: {config.workdir.resolve()}   model: {config.model}", style="dim"),
+            Text(f"workspace: {config.workdir}   model: {config.model}", style="dim"),
         )
         self.console.print(Panel(body, title="aiagent", title_align="left", border_style="cyan"))
 
@@ -65,12 +73,7 @@ class RichReporter(AgentObserver):
             self.console.print(Text("  ✗ " + _first_lines(result.output, 6), style="red"))
             return
         if call.name in EDIT_TOOLS:
-            summary, _, diff = result.output.partition("\n")
-            self.console.print(Text("  ✓ " + summary, style="green"))
-            if diff:
-                self.console.print(
-                    Syntax(diff, "diff", theme="ansi_dark", background_color="default")
-                )
+            print_edit(self.console, result.output)
         elif call.name in {"run_python", "run_tests"}:
             failed = "[exit code 0]" not in result.output
             status = result.output.splitlines()[1] if "\n" in result.output else result.output
@@ -81,16 +84,18 @@ class RichReporter(AgentObserver):
             self.console.print(Text(f"  ✓ {len(result.output.splitlines())} lines", style="dim"))
 
     def on_verification(self, verification: Verification) -> None:
-        if verification.command is None:
-            self.console.print("[yellow]⚠ no tests found; change is unverified[/yellow]")
+        command = verification.command
+        if verification.declined:
+            line = Text("⚠ tests not run (declined); change is unverified", style="yellow")
+        elif command is None:
+            line = Text("⚠ no tests found; change is unverified", style="yellow")
         elif verification.passed:
-            self.console.print(f"[green]✓ verified:[/green] {verification.command.display_command}")
+            line = Text("✓ verified: ", style="green") + Text(command.display_command)
         elif verification.passed is None:
-            self.console.print("[yellow]⚠ test command found no tests[/yellow]")
+            line = Text("⚠ test command found no tests", style="yellow")
         else:
-            self.console.print(
-                f"[red]✗ verification failed:[/red] {verification.command.display_command}"
-            )
+            line = Text("✗ verification failed: ", style="red") + Text(command.display_command)
+        self.console.print(line)
 
     def on_finish(self, result: RunResult) -> None:
         self.console.print()
@@ -105,9 +110,15 @@ class RichReporter(AgentObserver):
         )
         table.add_row("steps", f"{result.steps} model turns, {result.tool_calls} tool calls")
         table.add_row("changed", ", ".join(result.changed_files) or "—")
+        usage = result.usage
         table.add_row(
-            "tokens", f"{result.usage.input_tokens:,} in / {result.usage.output_tokens:,} out"
+            "tokens",
+            f"{usage.input_tokens:,} in ({usage.cached_tokens:,} cached) / "
+            f"{usage.output_tokens:,} out",
         )
+        cost = usage.cost(self.model)
+        if cost is not None:
+            table.add_row("cost", f"~${cost:.3f} (estimated at list prices)")
         table.add_row("time", f"{result.duration_s:.1f}s")
         self.console.print(table)
 
@@ -119,11 +130,16 @@ class InteractiveApprover:
         self.console = console
         self.approve_all = False
 
-    def __call__(self, call: ToolCall) -> bool:
+    def __call__(self, call: ToolCall, preview: ToolResult | None) -> bool:
         if self.approve_all:
             return True
+        if preview is not None and preview.ok:
+            print_edit(self.console, preview.output, mark="proposed:", style="cyan")
+        elif preview is not None:
+            self.console.print(Text("  this call will fail: " + preview.output, style="red"))
+        # A Text prompt is never parsed as markup, so model-chosen arguments show verbatim.
         answer = Prompt.ask(
-            f"  allow [bold]{describe_call(call)}[/bold]?",
+            Text.assemble("  allow ", (describe_call(call, width=None), "bold"), "?"),
             choices=["y", "n", "a"],
             default="y",
             console=self.console,
@@ -140,5 +156,5 @@ def _first_lines(text: str, count: int) -> str:
 def _last_lines(text: str, count: int) -> str:
     lines = text.splitlines()[2:]  # skip the "$ command" and status lines
     shown = lines[-count:]
-    prefix: list[Any] = ["    …"] if len(lines) > count else []
+    prefix = ["    …"] if len(lines) > count else []
     return "\n".join([*prefix, *("    " + line for line in shown)])
