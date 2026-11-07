@@ -1,0 +1,6 @@
+kind = "feature"
+prompt = """
+Add two operators to the calculator: modulo `%` (same precedence as `*` and `/`) and
+exponentiation `**` (higher precedence than `*`, right-associative, so `2 ** 3 ** 2` is 512).
+Add tests for both.
+"""

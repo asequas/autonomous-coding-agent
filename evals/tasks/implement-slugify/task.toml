@@ -1,0 +1,2 @@
+kind = "implement"
+prompt = "Implement slugify in textutils.py according to its docstring."

@@ -1,0 +1,6 @@
+kind = "feature"
+prompt = """
+Add a `--min-length N` option to wordcount.py that ignores words shorter than N characters
+(default 1, so default behaviour is unchanged). Also make sure tokens that are empty after
+stripping punctuation (like "--") are never counted. Add a test.
+"""

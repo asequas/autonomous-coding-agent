@@ -1,0 +1,6 @@
+kind = "bug fix"
+prompt = """
+`python main.py "1 / 0"` prints the confusing `Error: float division by zero`.
+Calculator.evaluate should raise ValueError("division by zero") instead, so the CLI prints
+`Error: division by zero`. Add a test.
+"""
